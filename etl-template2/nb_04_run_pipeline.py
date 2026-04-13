@@ -8,6 +8,13 @@
 # MAGIC Run this after `nb_00_setup_and_load_data` has been executed at least once.
 
 # COMMAND ----------
+# MAGIC %md ## Utilities
+
+# COMMAND ----------
+
+# MAGIC %run ./99_utilities/nb_utils_audit_logger
+
+# COMMAND ----------
 # MAGIC %md ## Configuration
 
 # COMMAND ----------
@@ -42,6 +49,21 @@ print(f"Catalog         : {CATALOG}")
 print(f"Batch Date      : {BATCH_DATE}")
 print(f"Storage Account : {STORAGE_ACCOUNT}")
 print(f"Landing Path    : {LANDING_PATH}")
+
+# COMMAND ----------
+# MAGIC %md ## Spark Performance Configuration
+# MAGIC
+# MAGIC These settings apply to the orchestrator notebook itself and to any SQL queries
+# MAGIC run in this cell context (e.g. the audit history query at the end).
+# MAGIC Each child notebook (`nb_01`–`nb_03`) sets its own Spark configuration on its
+# MAGIC own driver context when invoked via `dbutils.notebook.run`.
+
+# COMMAND ----------
+
+spark.conf.set("spark.sql.adaptive.enabled",                    "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
+print("Spark performance settings applied.")
 
 # COMMAND ----------
 # MAGIC %md ## Step 1 — Bronze Ingest
@@ -86,9 +108,22 @@ print(f"  Gold    : {result_gold}")
 print(f"  Elapsed : {elapsed:.1f}s")
 print("="*55)
 
+# COMMAND ----------
+# MAGIC %md ## Audit History
+
+# COMMAND ----------
+
+# show_pipeline_history() is loaded from nb_utils_audit_logger via %run above
+display(show_pipeline_history(catalog=CATALOG, days=1))
+
+# COMMAND ----------
+# MAGIC %md ## Recent DQ Results
+
+# COMMAND ----------
+
 display(spark.sql(f"""
-    SELECT step, status, rows_written, message, run_ts
-    FROM `{CATALOG}`.`audit`.`pipeline_run_log`
-    ORDER BY run_ts DESC
-    LIMIT 10
+    SELECT entity_name, layer, check_name, result, pass_rate, rows_failed, batch_date
+    FROM `{CATALOG}`.`audit`.`dq_check_results`
+    ORDER BY batch_date DESC, entity_name, layer
+    LIMIT 50
 """))

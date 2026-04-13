@@ -38,8 +38,8 @@ ADLS_BASE       = f"abfss://{CONTAINER}@{STORAGE_ACCOUNT}.dfs.core.windows.net/e
 LANDING_PATH    = f"{ADLS_BASE}/landing"
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
-CATALOG         = "supply_chain_dev"
-BATCH_DATE      = "2024-04-10"
+CATALOG    = "supply_chain_dev"
+BATCH_DATE = "2024-04-10"
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -53,6 +53,27 @@ print(f"Catalog      : {CATALOG}")
 print(f"Landing Path : {LANDING_PATH}")
 
 # COMMAND ----------
+# MAGIC %md ## Spark Performance Configuration
+# MAGIC
+# MAGIC | Setting | Value | Rationale |
+# MAGIC |---|---|---|
+# MAGIC | `adaptive.enabled` | true | AQE dynamically re-plans joins/aggregations at runtime |
+# MAGIC | `coalescePartitions.enabled` | true | AQE merges small shuffle partitions after wide transforms |
+# MAGIC | `maxPartitionBytes` | 128 MB | Controls how many bytes per Spark partition when reading CSV |
+# MAGIC | `optimizeWrite.enabled` | true | Delta rewrites small files into right-sized Parquet on write |
+# MAGIC | `autoCompact.enabled` | true | Delta auto-runs compaction after writes to prevent file sprawl |
+
+# COMMAND ----------
+
+spark.conf.set("spark.sql.adaptive.enabled",                          "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled",       "true")
+spark.conf.set("spark.sql.files.maxPartitionBytes",                   str(128 * 1024 * 1024))  # 128 MB per partition
+spark.conf.set("spark.databricks.delta.optimizeWrite.enabled",        "true")
+spark.conf.set("spark.databricks.delta.autoCompact.enabled",          "true")
+
+print("Spark performance settings applied.")
+
+# COMMAND ----------
 # MAGIC %md ## Helper — Read CSV from ADLS & Add Bronze Metadata
 
 # COMMAND ----------
@@ -63,9 +84,12 @@ def ingest_csv(table_name, landing_folder):
     csv_path = f"{LANDING_PATH}/{landing_folder}/"
 
     df = (spark.read
-          .option("header",    "true")
-          .option("inferSchema","true")
-          .option("nullValue", "")
+          .option("header",             "true")
+          .option("inferSchema",        "true")   # Use explicit schema in production for speed
+          .option("nullValue",          "")
+          .option("multiLine",          "false")   # Single-line CSV — faster reader path
+          .option("ignoreLeadingWhiteSpace", "true")
+          .option("ignoreTrailingWhiteSpace", "true")
           .csv(csv_path))
 
     row_count = df.count()
@@ -77,14 +101,15 @@ def ingest_csv(table_name, landing_folder):
         .withColumn("_source_file", F.input_file_name())
     )
 
-    bronze_df.write \
-        .format("delta") \
-        .mode("overwrite") \
-        .option("overwriteSchema", "true") \
-        .saveAsTable(f"{CATALOG}.bronze.{table_name}")
+    (bronze_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema",            "true")
+        .option("delta.autoOptimize.optimizeWrite", "true")  # File-size optimization on write
+        .saveAsTable(f"{CATALOG}.bronze.{table_name}"))
 
     print(f"  [OK] {CATALOG}.bronze.{table_name}  ({row_count:,} rows)")
-    return row_count, bronze_df
+    return row_count
 
 # COMMAND ----------
 # MAGIC %md ## Bronze Ingest — All Four Entities
@@ -98,25 +123,46 @@ with PipelineAudit(
     load_type="full", run_id=RUN_ID,
 ) as audit:
 
-    # ── 1. Suppliers ─────────────────────────────────────────────────────────
     print("\n--- Ingesting: suppliers ---")
-    rows_suppliers, df_suppliers = ingest_csv("raw_suppliers", "suppliers")
+    rows_suppliers = ingest_csv("raw_suppliers", "suppliers")
 
-    # ── 2. Products ──────────────────────────────────────────────────────────
     print("\n--- Ingesting: products ---")
-    rows_products, df_products = ingest_csv("raw_products", "products")
+    rows_products = ingest_csv("raw_products", "products")
 
-    # ── 3. Purchase Orders ───────────────────────────────────────────────────
     print("\n--- Ingesting: purchase_orders ---")
-    rows_po, df_po = ingest_csv("raw_purchase_orders", "purchase_orders")
+    rows_po = ingest_csv("raw_purchase_orders", "purchase_orders")
 
-    # ── 4. Purchase Order Lines ──────────────────────────────────────────────
     print("\n--- Ingesting: purchase_order_lines ---")
-    rows_lines, df_lines = ingest_csv("raw_purchase_order_lines", "purchase_order_lines")
+    rows_lines = ingest_csv("raw_purchase_order_lines", "purchase_order_lines")
 
     total_rows = rows_suppliers + rows_products + rows_po + rows_lines
     audit.set_rows_read(total_rows)
     audit.set_rows_written(total_rows)
+
+# COMMAND ----------
+# MAGIC %md ## Optimize Bronze Delta Tables
+# MAGIC
+# MAGIC `OPTIMIZE ... ZORDER BY` co-locates rows sharing the same key value in the same
+# MAGIC files. Downstream silver reads that filter on these columns skip far more files
+# MAGIC (data skipping), cutting scan time significantly on larger datasets.
+
+# COMMAND ----------
+
+print("Running OPTIMIZE on bronze tables ...")
+
+spark.sql(f"OPTIMIZE `{CATALOG}`.`bronze`.`raw_suppliers`"
+          f" ZORDER BY (supplier_id)")
+
+spark.sql(f"OPTIMIZE `{CATALOG}`.`bronze`.`raw_products`"
+          f" ZORDER BY (product_id, category)")
+
+spark.sql(f"OPTIMIZE `{CATALOG}`.`bronze`.`raw_purchase_orders`"
+          f" ZORDER BY (supplier_id, po_date)")
+
+spark.sql(f"OPTIMIZE `{CATALOG}`.`bronze`.`raw_purchase_order_lines`"
+          f" ZORDER BY (po_id, product_id)")
+
+print("OPTIMIZE complete.")
 
 # COMMAND ----------
 # MAGIC %md ## DQ Checks — Bronze Tables
@@ -153,12 +199,12 @@ print("\n=== DQ: bronze.raw_purchase_orders ===")
 run_dq_suite(
     df=spark.table(f"{CATALOG}.bronze.raw_purchase_orders"),
     suite=[
-        {"name": "not_null__po_id",         "type": "not_null",            "column": "po_id",        "threshold": 1.0},
-        {"name": "unique__po_id",           "type": "unique",              "column": "po_id",        "threshold": 1.0},
-        {"name": "not_null__supplier_id",   "type": "not_null",            "column": "supplier_id",  "threshold": 1.0},
-        {"name": "valid_status",            "type": "accepted_values",     "column": "status",
-         "values": ["DELIVERED","CANCELLED","IN_TRANSIT","APPROVED","PENDING"],             "threshold": 0.99},
-        {"name": "row_count_min_1",         "type": "row_count_threshold", "min_rows": 1,            "threshold": 1.0},
+        {"name": "not_null__po_id",       "type": "not_null",            "column": "po_id",       "threshold": 1.0},
+        {"name": "unique__po_id",         "type": "unique",              "column": "po_id",       "threshold": 1.0},
+        {"name": "not_null__supplier_id", "type": "not_null",            "column": "supplier_id", "threshold": 1.0},
+        {"name": "valid_status",          "type": "accepted_values",     "column": "status",
+         "values": ["DELIVERED","CANCELLED","IN_TRANSIT","APPROVED","PENDING"],              "threshold": 0.99},
+        {"name": "row_count_min_1",       "type": "row_count_threshold", "min_rows": 1,           "threshold": 1.0},
     ],
     entity_name="raw_purchase_orders", layer="bronze",
     run_id=RUN_ID, catalog=CATALOG, batch_date=BATCH_DATE,
@@ -168,11 +214,11 @@ print("\n=== DQ: bronze.raw_purchase_order_lines ===")
 run_dq_suite(
     df=spark.table(f"{CATALOG}.bronze.raw_purchase_order_lines"),
     suite=[
-        {"name": "not_null__line_id",  "type": "not_null",            "column": "line_id",  "threshold": 1.0},
-        {"name": "unique__line_id",    "type": "unique",              "column": "line_id",  "threshold": 1.0},
-        {"name": "not_null__po_id",    "type": "not_null",            "column": "po_id",    "threshold": 1.0},
-        {"name": "not_null__product_id","type": "not_null",           "column": "product_id","threshold": 1.0},
-        {"name": "row_count_min_1",    "type": "row_count_threshold", "min_rows": 1,        "threshold": 1.0},
+        {"name": "not_null__line_id",       "type": "not_null",            "column": "line_id",    "threshold": 1.0},
+        {"name": "unique__line_id",         "type": "unique",              "column": "line_id",    "threshold": 1.0},
+        {"name": "not_null__po_id",         "type": "not_null",            "column": "po_id",      "threshold": 1.0},
+        {"name": "not_null__product_id",    "type": "not_null",            "column": "product_id", "threshold": 1.0},
+        {"name": "row_count_min_1",         "type": "row_count_threshold", "min_rows": 1,          "threshold": 1.0},
     ],
     entity_name="raw_purchase_order_lines", layer="bronze",
     run_id=RUN_ID, catalog=CATALOG, batch_date=BATCH_DATE,

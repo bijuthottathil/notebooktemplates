@@ -15,8 +15,8 @@
 # MAGIC
 # MAGIC silver.purchase_orders
 # MAGIC   + silver.purchase_order_lines   →  silver.po_lines_enriched  (conformed join)
-# MAGIC   + silver.suppliers
-# MAGIC   + silver.products
+# MAGIC   + silver.suppliers              (broadcast — small dimension)
+# MAGIC   + silver.products               (broadcast — small dimension)
 # MAGIC ```
 
 # COMMAND ----------
@@ -61,6 +61,31 @@ print(f"Catalog      : {CATALOG}")
 print(f"Storage Base : {ADLS_BASE}")
 
 # COMMAND ----------
+# MAGIC %md ## Spark Performance Configuration
+# MAGIC
+# MAGIC | Setting | Value | Rationale |
+# MAGIC |---|---|---|
+# MAGIC | `adaptive.enabled` | true | AQE re-plans joins at runtime using actual row counts |
+# MAGIC | `coalescePartitions.enabled` | true | AQE merges tiny partitions after shuffles |
+# MAGIC | `skewJoin.enabled` | true | AQE splits skewed partitions in joins automatically |
+# MAGIC | `shuffle.partitions` | 8 | This dataset is small; default 200 creates 200 tiny tasks |
+# MAGIC | `autoBroadcastJoinThreshold` | 20 MB | Suppliers (~10 rows) and products (~15 rows) fit easily |
+# MAGIC | `optimizeWrite` | true | Delta auto-sizes Parquet files on write — no small-file problem |
+# MAGIC | `autoCompact` | true | Delta compacts after writes to keep file counts healthy |
+
+# COMMAND ----------
+
+spark.conf.set("spark.sql.adaptive.enabled",                          "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled",       "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled",                 "true")
+spark.conf.set("spark.sql.shuffle.partitions",                        "8")    # tune up for larger datasets
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold",                str(20 * 1024 * 1024))  # 20 MB
+spark.conf.set("spark.databricks.delta.optimizeWrite.enabled",        "true")
+spark.conf.set("spark.databricks.delta.autoCompact.enabled",          "true")
+
+print("Spark performance settings applied.")
+
+# COMMAND ----------
 # MAGIC %md ## Helper — Drop Bronze Metadata Columns
 
 # COMMAND ----------
@@ -86,26 +111,26 @@ with PipelineAudit(
     audit.set_rows_read(suppliers_raw.count())
 
     suppliers = (drop_meta(suppliers_raw)
-        # Cast types
-        .withColumn("rating",    F.col("rating").cast("double"))
-        .withColumn("is_active", F.col("is_active").cast("boolean"))
-        # Trim strings
+        .withColumn("rating",          F.col("rating").cast("double"))
+        .withColumn("is_active",       F.col("is_active").cast("boolean"))
         .withColumn("supplier_name",   F.trim(F.col("supplier_name")))
         .withColumn("country",         F.trim(F.col("country")))
         .withColumn("contact_email",   F.lower(F.trim(F.col("contact_email"))))
-        # Null guard on key
         .filter(F.col("supplier_id").isNotNull())
-        # Silver metadata
         .withColumn("_silver_ts",         F.current_timestamp())
         .withColumn("_silver_batch_date", F.lit(BATCH_DATE).cast("date"))
     )
 
-    suppliers.write.format("delta").mode("overwrite").option("overwriteSchema","true") \
-        .saveAsTable(f"{CATALOG}.silver.suppliers")
+    (suppliers.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{CATALOG}.silver.suppliers"))
 
     rows_suppliers = suppliers.count()
     audit.set_rows_written(rows_suppliers)
     print(f"silver.suppliers: {rows_suppliers} rows")
+
+# ZORDER by supplier_id so downstream joins skip files efficiently
+spark.sql(f"OPTIMIZE `{CATALOG}`.`silver`.`suppliers` ZORDER BY (supplier_id)")
 
 # DQ checks on silver.suppliers
 print("\n=== DQ: silver.suppliers ===")
@@ -147,7 +172,6 @@ with PipelineAudit(
         .withColumn("product_name",   F.trim(F.col("product_name")))
         .withColumn("category",       F.trim(F.col("category")))
         .withColumn("sub_category",   F.trim(F.col("sub_category")))
-        # Derived: margin %
         .withColumn("margin_pct",
             F.when(F.col("unit_price") > 0,
                 F.round((F.col("unit_price") - F.col("unit_cost")) / F.col("unit_price") * 100, 1)
@@ -158,12 +182,16 @@ with PipelineAudit(
         .withColumn("_silver_batch_date", F.lit(BATCH_DATE).cast("date"))
     )
 
-    products.write.format("delta").mode("overwrite").option("overwriteSchema","true") \
-        .saveAsTable(f"{CATALOG}.silver.products")
+    (products.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{CATALOG}.silver.products"))
 
     rows_products = products.count()
     audit.set_rows_written(rows_products)
     print(f"silver.products: {rows_products} rows")
+
+# ZORDER by product_id and category for join + filter pushdown in gold
+spark.sql(f"OPTIMIZE `{CATALOG}`.`silver`.`products` ZORDER BY (product_id, category)")
 
 # DQ checks on silver.products
 print("\n=== DQ: silver.products ===")
@@ -197,21 +225,19 @@ with PipelineAudit(
     audit.set_rows_read(po_raw.count())
 
     purchase_orders = (drop_meta(po_raw)
-        .withColumn("po_date",                   F.col("po_date").cast("date"))
-        .withColumn("expected_delivery_date",    F.col("expected_delivery_date").cast("date"))
-        .withColumn("actual_delivery_date",      F.col("actual_delivery_date").cast("date"))
-        .withColumn("shipping_cost",             F.col("shipping_cost").cast("double"))
-        .withColumn("status",                    F.upper(F.trim(F.col("status"))))
-        .withColumn("currency",                  F.upper(F.trim(F.col("currency"))))
-        # Blank notes → NULL
-        .withColumn("notes", F.when(F.trim(F.col("notes")) == "", F.lit(None)).otherwise(F.col("notes")))
-        # Derived: was delivery on time? (NULL if not yet delivered)
+        .withColumn("po_date",                F.col("po_date").cast("date"))
+        .withColumn("expected_delivery_date", F.col("expected_delivery_date").cast("date"))
+        .withColumn("actual_delivery_date",   F.col("actual_delivery_date").cast("date"))
+        .withColumn("shipping_cost",          F.col("shipping_cost").cast("double"))
+        .withColumn("status",                 F.upper(F.trim(F.col("status"))))
+        .withColumn("currency",               F.upper(F.trim(F.col("currency"))))
+        .withColumn("notes",
+            F.when(F.trim(F.col("notes")) == "", F.lit(None)).otherwise(F.col("notes")))
         .withColumn("is_on_time",
             F.when(F.col("actual_delivery_date").isNotNull(),
                 F.col("actual_delivery_date") <= F.col("expected_delivery_date")
             ).otherwise(F.lit(None))
         )
-        # Derived: days late (positive = late, negative = early)
         .withColumn("days_late",
             F.when(F.col("actual_delivery_date").isNotNull(),
                 F.datediff(F.col("actual_delivery_date"), F.col("expected_delivery_date"))
@@ -222,23 +248,27 @@ with PipelineAudit(
         .withColumn("_silver_batch_date", F.lit(BATCH_DATE).cast("date"))
     )
 
-    purchase_orders.write.format("delta").mode("overwrite").option("overwriteSchema","true") \
-        .saveAsTable(f"{CATALOG}.silver.purchase_orders")
+    (purchase_orders.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{CATALOG}.silver.purchase_orders"))
 
     rows_po = purchase_orders.count()
     audit.set_rows_written(rows_po)
     print(f"silver.purchase_orders: {rows_po} rows")
+
+# ZORDER by supplier_id + po_date for join and date-range filter pushdown
+spark.sql(f"OPTIMIZE `{CATALOG}`.`silver`.`purchase_orders` ZORDER BY (supplier_id, po_date)")
 
 # DQ checks on silver.purchase_orders
 print("\n=== DQ: silver.purchase_orders ===")
 run_dq_suite(
     df=spark.table(f"{CATALOG}.silver.purchase_orders"),
     suite=[
-        {"name": "not_null__po_id",       "type": "not_null",        "column": "po_id",       "threshold": 1.0},
-        {"name": "unique__po_id",         "type": "unique",          "column": "po_id",       "threshold": 1.0},
-        {"name": "not_null__supplier_id", "type": "not_null",        "column": "supplier_id", "threshold": 1.0},
+        {"name": "not_null__po_id",       "type": "not_null",        "column": "po_id",        "threshold": 1.0},
+        {"name": "unique__po_id",         "type": "unique",          "column": "po_id",        "threshold": 1.0},
+        {"name": "not_null__supplier_id", "type": "not_null",        "column": "supplier_id",  "threshold": 1.0},
         {"name": "valid_status",          "type": "accepted_values", "column": "status",
-         "values": ["DELIVERED","CANCELLED","IN_TRANSIT","APPROVED","PENDING"],               "threshold": 0.99},
+         "values": ["DELIVERED","CANCELLED","IN_TRANSIT","APPROVED","PENDING"],                 "threshold": 0.99},
         {"name": "range__shipping_cost",  "type": "range",           "column": "shipping_cost","min": 0, "threshold": 1.0},
     ],
     entity_name="purchase_orders", layer="silver",
@@ -265,10 +295,8 @@ with PipelineAudit(
         .withColumn("quantity_received", F.col("quantity_received").cast("int"))
         .withColumn("unit_cost",         F.col("unit_cost").cast("double"))
         .withColumn("line_status",       F.upper(F.trim(F.col("line_status"))))
-        # Derived: line value
         .withColumn("ordered_value",  F.round(F.col("quantity_ordered")  * F.col("unit_cost"), 2))
         .withColumn("received_value", F.round(F.col("quantity_received") * F.col("unit_cost"), 2))
-        # Derived: receipt rate %
         .withColumn("receipt_rate_pct",
             F.when(F.col("quantity_ordered") > 0,
                 F.round(F.col("quantity_received") / F.col("quantity_ordered") * 100, 1)
@@ -279,27 +307,31 @@ with PipelineAudit(
         .withColumn("_silver_batch_date", F.lit(BATCH_DATE).cast("date"))
     )
 
-    po_lines.write.format("delta").mode("overwrite").option("overwriteSchema","true") \
-        .saveAsTable(f"{CATALOG}.silver.purchase_order_lines")
+    (po_lines.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{CATALOG}.silver.purchase_order_lines"))
 
     rows_lines = po_lines.count()
     audit.set_rows_written(rows_lines)
     print(f"silver.purchase_order_lines: {rows_lines} rows")
+
+# ZORDER by po_id + product_id — primary join keys for the enriched join below
+spark.sql(f"OPTIMIZE `{CATALOG}`.`silver`.`purchase_order_lines` ZORDER BY (po_id, product_id)")
 
 # DQ checks on silver.purchase_order_lines
 print("\n=== DQ: silver.purchase_order_lines ===")
 run_dq_suite(
     df=spark.table(f"{CATALOG}.silver.purchase_order_lines"),
     suite=[
-        {"name": "not_null__line_id",            "type": "not_null", "column": "line_id",          "threshold": 1.0},
-        {"name": "unique__line_id",              "type": "unique",   "column": "line_id",          "threshold": 1.0},
-        {"name": "not_null__po_id",              "type": "not_null", "column": "po_id",            "threshold": 1.0},
-        {"name": "not_null__product_id",         "type": "not_null", "column": "product_id",       "threshold": 1.0},
-        {"name": "range__quantity_ordered",      "type": "range",    "column": "quantity_ordered", "min": 0, "threshold": 1.0},
-        {"name": "range__quantity_received",     "type": "range",    "column": "quantity_received","min": 0, "threshold": 1.0},
-        {"name": "range__receipt_rate_pct",      "type": "range",    "column": "receipt_rate_pct", "min": 0, "max": 100, "threshold": 1.0},
-        {"name": "valid_line_status",            "type": "accepted_values", "column": "line_status",
-         "values": ["RECEIVED","PARTIAL","CANCELLED","PENDING"],                                    "threshold": 0.99},
+        {"name": "not_null__line_id",        "type": "not_null",        "column": "line_id",          "threshold": 1.0},
+        {"name": "unique__line_id",          "type": "unique",          "column": "line_id",          "threshold": 1.0},
+        {"name": "not_null__po_id",          "type": "not_null",        "column": "po_id",            "threshold": 1.0},
+        {"name": "not_null__product_id",     "type": "not_null",        "column": "product_id",       "threshold": 1.0},
+        {"name": "range__quantity_ordered",  "type": "range",           "column": "quantity_ordered", "min": 0, "threshold": 1.0},
+        {"name": "range__quantity_received", "type": "range",           "column": "quantity_received","min": 0, "threshold": 1.0},
+        {"name": "range__receipt_rate_pct",  "type": "range",           "column": "receipt_rate_pct", "min": 0, "max": 100, "threshold": 1.0},
+        {"name": "valid_line_status",        "type": "accepted_values", "column": "line_status",
+         "values": ["RECEIVED","PARTIAL","CANCELLED","PENDING"],                                       "threshold": 0.99},
     ],
     entity_name="purchase_order_lines", layer="silver",
     run_id=RUN_ID, catalog=CATALOG, batch_date=BATCH_DATE,
@@ -310,6 +342,12 @@ run_dq_suite(
 # MAGIC
 # MAGIC Join all four silver tables into a single wide table that the gold layer can
 # MAGIC aggregate without any further joins.
+# MAGIC
+# MAGIC **Performance notes:**
+# MAGIC - `suppliers` and `products` are small dimension tables — wrapped in `F.broadcast()`
+# MAGIC   so each executor gets a local copy and no shuffle is needed for these joins.
+# MAGIC - `po_lines_enriched` is `.cache()`-d before write so the `count()` call reuses
+# MAGIC   the in-memory plan rather than recomputing the four-way join from scratch.
 
 # COMMAND ----------
 
@@ -320,43 +358,50 @@ with PipelineAudit(
     load_type="full", run_id=RUN_ID,
 ) as audit:
 
-    # Re-read from silver (to pick up cleansed types)
+    # Re-read from silver (picks up cleansed types, benefits from ZORDER)
     sv_po        = spark.table(f"{CATALOG}.silver.purchase_orders")
     sv_lines     = spark.table(f"{CATALOG}.silver.purchase_order_lines")
     sv_suppliers = spark.table(f"{CATALOG}.silver.suppliers").drop("_silver_ts","_silver_batch_date")
     sv_products  = spark.table(f"{CATALOG}.silver.products").drop("_silver_ts","_silver_batch_date")
 
-    rows_input = sv_lines.count()
-    audit.set_rows_read(rows_input)
+    audit.set_rows_read(sv_lines.count())
 
     po_lines_enriched = (sv_lines
-        # Join PO header
+        # Large fact → large fact join (shuffle join, benefits from ZORDER on po_id)
         .join(sv_po.select(
             "po_id","supplier_id","po_date","expected_delivery_date","actual_delivery_date",
             "status","currency","shipping_cost","is_on_time","days_late"
         ), on="po_id", how="left")
 
-        # Join supplier dimension
-        .join(sv_suppliers.select(
+        # Small dimension — broadcast to avoid shuffle entirely (~10 rows)
+        .join(F.broadcast(sv_suppliers.select(
             "supplier_id","supplier_name","country","region","payment_terms","rating"
-        ), on="supplier_id", how="left")
+        )), on="supplier_id", how="left")
 
-        # Join product dimension
-        .join(sv_products.select(
+        # Small dimension — broadcast to avoid shuffle entirely (~15 rows)
+        .join(F.broadcast(sv_products.select(
             "product_id","product_name","category","sub_category","uom","unit_price","margin_pct"
-        ), on="product_id", how="left")
+        )), on="product_id", how="left")
 
-        # Rename to avoid ambiguity (unit_cost comes from the line, unit_price from product)
         .withColumn("_silver_ts",         F.current_timestamp())
         .withColumn("_silver_batch_date", F.lit(BATCH_DATE).cast("date"))
     )
 
-    po_lines_enriched.write.format("delta").mode("overwrite").option("overwriteSchema","true") \
-        .saveAsTable(f"{CATALOG}.silver.po_lines_enriched")
+    # Cache before write so count() reuses the materialised plan
+    po_lines_enriched.cache()
 
-    rows_enriched = po_lines_enriched.count()
+    (po_lines_enriched.write.format("delta").mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(f"{CATALOG}.silver.po_lines_enriched"))
+
+    rows_enriched = po_lines_enriched.count()   # served from cache
+    po_lines_enriched.unpersist()               # release memory
     audit.set_rows_written(rows_enriched)
     print(f"silver.po_lines_enriched: {rows_enriched} rows  (grain: one row per PO line)")
+
+# ZORDER by the gold layer's primary grouping keys for partition pruning
+spark.sql(f"OPTIMIZE `{CATALOG}`.`silver`.`po_lines_enriched`"
+          f" ZORDER BY (supplier_id, product_id, po_date)")
 
 # COMMAND ----------
 # MAGIC %md ## 6. Data Quality Summary — `po_lines_enriched`
@@ -369,15 +414,13 @@ print("\n=== DQ: silver.po_lines_enriched ===")
 run_dq_suite(
     df=enriched_df,
     suite=[
-        {"name": "not_null__line_id",      "type": "not_null", "column": "line_id",      "threshold": 1.0},
-        {"name": "not_null__po_id",        "type": "not_null", "column": "po_id",        "threshold": 1.0},
-        {"name": "not_null__supplier_id",  "type": "not_null", "column": "supplier_id",  "threshold": 1.0},
-        {"name": "not_null__product_id",   "type": "not_null", "column": "product_id",   "threshold": 1.0},
-        # Referential integrity: supplier_name should be populated after join
-        {"name": "join_supplier_match",    "type": "not_null", "column": "supplier_name","threshold": 0.99},
-        # Referential integrity: product_name should be populated after join
-        {"name": "join_product_match",     "type": "not_null", "column": "product_name", "threshold": 0.99},
-        {"name": "row_count_min_1",        "type": "row_count_threshold", "min_rows": 1, "threshold": 1.0},
+        {"name": "not_null__line_id",     "type": "not_null", "column": "line_id",      "threshold": 1.0},
+        {"name": "not_null__po_id",       "type": "not_null", "column": "po_id",        "threshold": 1.0},
+        {"name": "not_null__supplier_id", "type": "not_null", "column": "supplier_id",  "threshold": 1.0},
+        {"name": "not_null__product_id",  "type": "not_null", "column": "product_id",   "threshold": 1.0},
+        {"name": "join_supplier_match",   "type": "not_null", "column": "supplier_name","threshold": 0.99},
+        {"name": "join_product_match",    "type": "not_null", "column": "product_name", "threshold": 0.99},
+        {"name": "row_count_min_1",       "type": "row_count_threshold", "min_rows": 1, "threshold": 1.0},
     ],
     entity_name="po_lines_enriched", layer="silver",
     run_id=RUN_ID, catalog=CATALOG, batch_date=BATCH_DATE,
