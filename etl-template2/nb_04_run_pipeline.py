@@ -12,7 +12,7 @@
 
 # COMMAND ----------
 
-# MAGIC %run ./99_utilities/nb_utils_audit_logger
+# MAGIC %run ./utilities/nb_utils_audit_logger
 
 # COMMAND ----------
 # MAGIC %md ## Configuration

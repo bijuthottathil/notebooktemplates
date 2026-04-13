@@ -20,11 +20,11 @@
 
 # COMMAND ----------
 
-# MAGIC %run ./99_utilities/nb_utils_audit_logger
+# MAGIC %run ./utilities/nb_utils_audit_logger
 
 # COMMAND ----------
 
-# MAGIC %run ./99_utilities/nb_utils_data_quality
+# MAGIC %run ./utilities/nb_utils_data_quality
 
 # COMMAND ----------
 # MAGIC %md ## Configuration
