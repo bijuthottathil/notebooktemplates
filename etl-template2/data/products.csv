@@ -1,0 +1,16 @@
+product_id,product_name,category,sub_category,unit_cost,unit_price,uom,lead_time_days,reorder_point,is_active
+PRD001,Steel Bolt M10,Fasteners,Bolts,0.15,0.45,Each,7,500,true
+PRD002,Steel Nut M10,Fasteners,Nuts,0.10,0.30,Each,7,500,true
+PRD003,Stainless Washer 10mm,Fasteners,Washers,0.05,0.18,Each,7,1000,true
+PRD004,Hydraulic Hose 1/2in,Hydraulics,Hoses,12.50,28.00,Metre,14,50,true
+PRD005,Hydraulic Fitting 90deg,Hydraulics,Fittings,3.75,9.50,Each,14,100,true
+PRD006,Bearing 6205-2RS,Bearings,Ball Bearings,4.20,11.00,Each,10,200,true
+PRD007,Bearing 6305-ZZ,Bearings,Ball Bearings,5.80,14.50,Each,10,150,true
+PRD008,V-Belt A42,Drives,Belts,6.90,16.00,Each,5,80,true
+PRD009,Coupling Flex 25mm,Drives,Couplings,18.40,42.00,Each,12,30,true
+PRD010,Conveyor Chain 40B,Conveyors,Chains,35.00,78.00,Metre,21,20,true
+PRD011,Safety Valve 1/4in,Valves,Safety,22.00,55.00,Each,14,40,true
+PRD012,Ball Valve 1/2in,Valves,Ball,8.50,21.00,Each,7,60,true
+PRD013,Pressure Gauge 0-16bar,Instrumentation,Gauges,14.00,32.00,Each,10,25,true
+PRD014,Electric Motor 2.2kW,Electrical,Motors,185.00,420.00,Each,30,5,true
+PRD015,Control Panel 24VDC,Electrical,Panels,320.00,750.00,Each,45,3,false

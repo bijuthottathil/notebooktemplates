@@ -1,0 +1,11 @@
+supplier_id,supplier_name,country,region,contact_email,payment_terms,rating,is_active
+SUP001,Acme Industrial,USA,North America,orders@acme-ind.com,NET30,4.5,true
+SUP002,GlobalParts Ltd,Germany,Europe,supply@globalparts.de,NET45,4.8,true
+SUP003,FastFix Co,China,Asia Pacific,sales@fastfix.cn,NET60,3.9,true
+SUP004,SteelWorks Inc,Canada,North America,procurement@steelworks.ca,NET30,4.2,true
+SUP005,TechComponents AG,Switzerland,Europe,orders@techcomp.ch,NET45,4.7,true
+SUP006,Pacific Supply,Australia,Asia Pacific,info@pacificsupply.au,NET30,4.1,true
+SUP007,Nordic Materials,Sweden,Europe,sales@nordicmat.se,NET60,4.6,true
+SUP008,Southern Metals,Mexico,Latin America,compras@southernmetals.mx,NET30,3.7,true
+SUP009,EastWest Trading,India,Asia Pacific,trade@ewtrading.in,NET45,4.0,false
+SUP010,PrecisionParts USA,USA,North America,orders@precisionparts.com,NET30,4.9,true
