@@ -259,6 +259,10 @@ print(f"Audit table ready: {CATALOG}.audit.dq_check_results")
 # MAGIC | members   | 15   | Enrolled members across plans and states |
 # MAGIC | providers | 8    | Physicians and facilities (in/out of network) |
 # MAGIC | claims    | 52   | Medical, pharmacy, and dental claims |
+# MAGIC
+# MAGIC **Alternative:** The same data is available as static CSV files in the `data/`
+# MAGIC folder of this repo. You can upload those manually to `{LANDING_PATH}/<entity>/`
+# MAGIC on your ADLS container instead of running the cell below.
 
 # COMMAND ----------
 
