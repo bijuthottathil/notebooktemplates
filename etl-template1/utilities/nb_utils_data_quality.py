@@ -7,13 +7,13 @@
 # MAGIC **Usage:**
 # MAGIC ```python
 # MAGIC %run ./utilities/nb_utils_data_quality
-# MAGIC results = run_dq_suite(df=my_df, suite=MY_DQ_SUITE, entity_name="suppliers",
+# MAGIC results = run_dq_suite(df=my_df, suite=MY_DQ_SUITE, entity_name="claims",
 # MAGIC                        layer="bronze", run_id=RUN_ID, catalog=CATALOG, batch_date=BATCH_DATE)
 # MAGIC ```
 
 # COMMAND ----------
 
-from pyspark.sql import DataFrame, functions as F
+from pyspark.sql import functions as F
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Individual Check Functions
@@ -57,8 +57,8 @@ def dq_accepted_values(df, col, accepted):
     return {"rows_checked": total, "rows_passed": passed, "rows_failed": total - passed}
 
 def dq_row_count_threshold(df, min_rows, max_rows=None):
-    total  = df.count()
-    ok     = total >= min_rows and (max_rows is None or total <= max_rows)
+    total = df.count()
+    ok    = total >= min_rows and (max_rows is None or total <= max_rows)
     return {"rows_checked": 1, "rows_passed": int(ok), "rows_failed": int(not ok)}
 
 def dq_freshness(df, ts_col, max_age_hours):

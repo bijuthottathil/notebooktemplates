@@ -10,8 +10,8 @@
 # MAGIC %run ./utilities/nb_utils_audit_logger
 # MAGIC
 # MAGIC with PipelineAudit(catalog=CATALOG, pipeline_name="nb_01_bronze_ingest",
-# MAGIC                    layer="bronze", source_system="supply_chain",
-# MAGIC                    entity_name="suppliers", batch_date=BATCH_DATE,
+# MAGIC                    layer="bronze", source_system="health_insurance",
+# MAGIC                    entity_name="claims", batch_date=BATCH_DATE,
 # MAGIC                    load_type="full") as audit:
 # MAGIC     df = spark.read...
 # MAGIC     audit.set_rows_read(df.count())
@@ -130,17 +130,10 @@ def show_pipeline_history(catalog, pipeline_name=None, days=7):
         where += f" AND pipeline_name = '{pipeline_name}'"
     return spark.sql(f"""
         SELECT
-            pipeline_name,
-            layer,
-            entity_name,
-            batch_date,
-            status,
-            rows_read,
-            rows_written,
-            rows_rejected,
+            pipeline_name, layer, entity_name, batch_date, status,
+            rows_read, rows_written, rows_rejected,
             ROUND(duration_seconds, 1) AS duration_s,
-            start_ts,
-            error_message
+            start_ts, error_message
         FROM `{catalog}`.`audit`.`pipeline_run_log`
         {where}
         ORDER BY start_ts DESC
