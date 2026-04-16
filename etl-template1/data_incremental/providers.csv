@@ -1,0 +1,10 @@
+provider_id,provider_name,provider_type,specialty,state,npi_number,network_tier,is_in_network
+PRV001,Dr. Anne Harrison,PCP,Family Medicine,TX,1234567890,Tier 1,true
+PRV002,Dr. Samuel Ortega,Specialist,Cardiology,FL,2345678901,Tier 1,true
+PRV003,Sunrise Medical Center,Hospital,General,CA,3456789012,Tier 1,true
+PRV004,Dr. Mei Lin,Specialist,Endocrinology,NY,4567890123,Tier 2,true
+PRV005,Green Valley Urgent Care,Urgent Care,Urgent Care,IL,5678901234,Tier 1,true
+PRV006,Dr. Brian Foster,PCP,Internal Medicine,GA,6789012345,Tier 2,true
+PRV007,Pinnacle Orthopedics,Specialist,Orthopedics,OH,7890123456,Tier 1,true
+PRV008,ClearView Pharmacy,Pharmacy,Retail Pharmacy,TX,8901234567,Tier 1,true
+PRV009,Lakeside Mental Health,Specialist,Psychiatry,NY,9012345678,Tier 1,true

@@ -1,0 +1,6 @@
+member_id,plan_id,first_name,last_name,dob,gender,state,zip_code,enrollment_date,termination_date,is_active
+MBR001,PL001,James,Carter,1978-03-14,M,TX,75201,2024-01-01,,true
+MBR007,PL004,Robert,Williams,1955-12-03,M,OH,44101,2024-01-01,,true
+MBR014,PL001,Nancy,Robinson,1968-03-17,F,PA,19101,2024-03-01,,true
+MBR016,PL005,Grace,Nguyen,2001-04-10,F,TX,78201,2024-08-01,,true
+MBR017,PL002,Andre,Washington,1979-12-29,M,NY,11201,2024-08-01,,true
